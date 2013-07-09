@@ -29,8 +29,50 @@ struct datapt {
 }
 struct tfpt {
     string name;
-    double up, down;
-    double pval;
+    uint up, down, insig,targets;
+    real pval_up, pval_down;
+    double prec_up, prec_down;
+}
+
+static pure real c (in uint n, in uint c) 
+{
+    //produces cCn in a relatively safe way
+    //in general n>>c, no need to check.
+    if (n==0||c==0) return 1;
+    real acc= 1;
+    for (ulong k=n, m=c; k>=n-c+1 || m>=1; k--, m--)
+    {
+        if(k>=n-c+1) acc*=k;
+        if(m>=1) acc/=m;
+        //io.writefln("Here we got k, m, acc as %f, %f, %f", k, m, acc );
+    }
+    return acc;
+}
+static pure void fisher(in tfpt wt, ref tfpt exp)
+{
+    //now get up
+    exp.pval_up= c(wt.up+exp.up,wt.up)*(
+            c(wt.down+wt.insig+exp.down+exp.insig,wt.down+wt.insig)
+            /
+            c(wt.up+wt.down+wt.insig+exp.up+exp.down+exp.insig,wt.up+wt.down+wt.insig)
+                );
+    //io.writeln(to!string(exp.pval_up));
+    //now get down
+    exp.pval_down= c(wt.down+exp.down, wt.down)*(
+            c(wt.up+wt.insig+exp.up+exp.insig,wt.up+wt.insig)
+            /
+            c(wt.up+wt.down+wt.insig+exp.up+exp.down+exp.insig,wt.up+wt.down+wt.insig)
+                );
+    //io.writeln(to!string(exp.pval_down));
+}
+static string join (T) (in T[] l, in string set="\t")
+{
+    auto acc="";
+    foreach (it; l)
+    {
+        acc~=to!string(it)~"\t";
+    }
+    return acc[0 .. $-1];
 }
 class tfmaps
 {
@@ -67,6 +109,7 @@ class tfmaps
                 //io.writefln("Parsed expmean is %s", (*temp).exp_mean);
                 (*temp).pval = to!double(str.strip(words[4]));
                 //io.writefln("Parsed pval  is %s", (*temp).pval);
+                tfmap [(*temp).TFname] ~= temp;
             }
         }
     };
@@ -89,25 +132,81 @@ class tfmaps
                 (*temp).probeid = str.strip(words[1]);
                 //io.writefln("Here we got %s, %s, %s",
                         //(*temp).TFname , (*temp).genesym, (*temp).probeid);
-                tfmap [(*temp).TFname] ~= temp;
                 probemap [(*temp).probeid] ~= temp;
             }
        }
     };
-    void gen_avg()
-    {
-        //Generate the average behavior a central TF
-    };
-    void gen_tfs()
+    void gen_tfs(in double CUTOFF=5e-2)
     {
         //iterate through the tfs and do the fisher test
+        uint up_acc , down_acc , insig_acc ;
+        up_acc = down_acc = insig_acc = 0;
+        foreach (it; tfmap)
+        {
+            tfpt temp;
+            with (temp)
+            {
+                name= (*it[0]).TFname;
+                targets=to!uint(it.length);
+                up = down = insig = 0;
+                //io.writefln("At %s, has this many targets: %d", name, it.length);
+                foreach(itt; it)
+                {
+                    if ((*itt).pval < CUTOFF )
+                        (*itt).wt_mean>(*itt).exp_mean?down++:up++;
+                    else insig++;
+                }
+                prec_up=to!double(up)/(up+down+insig);
+                prec_down=to!double(down)/(up+down+insig);
+                up_acc+=up;
+                down_acc+=down;
+                insig_acc+=insig;
+                //io.writefln("At %s, up %d, down %d, insig %d", name, up, down, insig);
+            }
+            tfs~=temp;
+        }
+        with (AVG)
+        {
+            name="AVERAGE_TF";
+            up=up_acc/to!uint(tfmap.length);
+            down=down_acc/to!uint(tfmap.length);
+            insig=insig_acc/to!uint(tfmap.length);
+            io.writefln("Length %d, insig %d", tfmap.length, insig);
+        }
     };
+    void fisher_test()
+    {
+            //io.writefln("Now doing fisher");
+        foreach (ref it; tfs)
+        {
+            fisher(AVG,it);
+            //io.writefln("Changed pvals to %f, %f", it.pval_up, it.pval_down);
+        }
+    };
+    void to_print(in string ofname="output.tsv")
+    {
+        auto f=io.File(ofname,"w");
+        f.write(join([
+                    "TFname", "Targets_Up","Targets_Down", "Targets_Neither","Targets_total",
+                    "pVal_Up", "pVal_Down","%Up","%Down","\n"
+                    ]));
+        foreach(it; tfs)
+        {
+            with(it)
+            {
+                f.write(name~"\t"~join([
+                        up, down,insig,targets,pval_up,pval_down, prec_up,prec_down
+                        ])~"\n");
+            }
+        }
+        f.close();
+
+    }
     datapt*[][string] probemap;
     datapt*[][string] tfmap;
     tfpt AVG;
     tfpt[] tfs;
 }
-
 int main(string[] args)
 {
     auto mymap = new tfmaps;
@@ -116,6 +215,9 @@ int main(string[] args)
     {
         mymap.bootstrap(args[1]);
         mymap.load(args[2]);
+        mymap.gen_tfs();
+        mymap.fisher_test();
+        mymap.to_print();
     }
     catch
     {
@@ -129,17 +231,39 @@ unittest
     auto mymap = new tfmaps;
     mymap.bootstrap("./tf_affy_map_hg.txt");
     mymap.load("./exported.txt");
-    foreach (string key, datapt*[] _val; mymap.tfmap)
-    {
-        io.writefln("The key is this: %s",key);
-        foreach (datapt* _val2; _val)
-        {
-            auto val = *_val2;
-            io.writefln ("The three values again are %s, %s, %s",
-                    val.TFname,val.probeid, val.genesym);
-            io.writefln ("The numbers are %s, %s, %s", 
-                    val.wt_mean, val.exp_mean, val.pval);
+    //foreach (string key, datapt*[] _val; mymap.tfmap)
+    //{
+        ////io.writefln("The key is this: %s",key);
+        //foreach (datapt* _val2; _val)
+        //{
+            //auto val = *_val2;
+            ////io.writefln ("The three values again are %s, %s, %s",
+                    ////val.TFname,val.probeid, val.genesym);
+            ////io.writefln ("The numbers are %s, %s, %s", 
+                    ////val.wt_mean, val.exp_mean, val.pval);
             //assert (key == val.TFname);
-        }
+            //assert (val._genesym!="");
+        //}
+    //}
+    mymap.gen_tfs();
+    mymap.fisher_test();
+    io.writefln("The average have stats %d, %d, %d"
+            ,mymap.AVG.up, mymap.AVG.down, mymap.AVG.insig);
+    foreach(it; mymap.tfs)
+    {
+
+        io.writefln ("Genesym %s:%d targets, %d up, %d down,%f pre up %f pre down,  %f pvalup %f pval down",
+                it.name, it.targets, it.up,it.down,it.prec_up, it.prec_down,it.pval_up,it.pval_down
+                );
     }
+    io.writefln("C5,2 is %f", c(5,2));
+    assert( to!int(c(5,2))==10);
+    io.writefln("C6,3 is %f", c(6,3));
+    assert( to!int(c(6,3))==20);
+    io.writefln("C8,2 is %f", c(8,2));
+    assert( to!int(c(8,2))==28);
+    io.writefln("join is this %s", join([1,2,3]));
+    mymap.to_print();
+    //assert( ft(3)==6);
+    //assert( ft(10)==3628800);
 }

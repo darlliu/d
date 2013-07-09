@@ -3,6 +3,11 @@
 *.lo
 *.o
 
+*.txt
+*.bin
+*.pkl
+*.csv
+*.tsv
 # Compiled Dynamic libraries
 *.so
 *.dylib
